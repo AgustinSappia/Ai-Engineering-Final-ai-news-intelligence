@@ -1,0 +1,28 @@
+flowchart LR
+    INI(["INICIO"]):::borde --> SUP
+    SUP{{"Supervisor<br/><small>reglas + LLM<br/>con guardrails</small>"}}:::sup
+
+    subgraph ESP["Especialistas (siempre vuelven al Supervisor)"]
+        direction TB
+        INV["Investigador<br/><small>elige los argumentos de<br/>buscar_noticias (RAG)</small>"]:::agente
+        ANA["Analista<br/><small>sentimiento por noticia</small>"]:::agente
+        RED["Redactor<br/><small>informe con citas +<br/>filtro de veracidad</small>"]:::agente
+    end
+
+    SUP -- "1 · investigar / refinar" --> INV
+    SUP -- "2 · analizar" --> ANA
+    SUP -- "3 · redactar" --> RED
+    INV & ANA & RED --> SUP
+
+    SUP -- "FINALIZAR<br/>con informe" --> HITL{{"AprobacionHumana<br/><small>negativo o forzado<br/>→ interrupt()</small>"}}:::hitl
+    HITL -- "aprobado" --> PUB[/"Publicador"/]:::pub
+    HITL -- "rechazado" --> FIN(["FIN"]):::borde
+    PUB --> FIN
+    SUP -- "FINALIZAR<br/>sin información" --> FIN
+
+    classDef borde fill:#f1f5f9,stroke:#475569,color:#0f172a
+    classDef sup fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef agente fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef hitl fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
+    classDef pub fill:#ede9fe,stroke:#6d28d9,color:#3b0764
+    style ESP fill:#f0fdf4,stroke:#86efac

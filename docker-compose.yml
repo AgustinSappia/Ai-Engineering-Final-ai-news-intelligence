@@ -1,0 +1,52 @@
+# Todo el sistema con una sola instrucción:
+#     docker compose up --build
+#
+#   API (Swagger):  http://localhost:8000/docs
+#   Chroma:         http://localhost:8001   (base vectorial)
+#   Redis:          localhost:6379          (jobs, eventos y checkpoints)
+
+services:
+  redis:
+    # Redis 8 trae incorporados los módulos de búsqueda y JSON que necesita
+    # el checkpointer de LangGraph (AsyncRedisSaver). Redis 7 no alcanza.
+    image: redis:8
+    command: ["redis-server", "--appendonly", "yes"]  # persistencia en disco
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  chroma:
+    # Misma versión que el cliente de requirements.txt (chromadb-client).
+    image: chromadb/chroma:1.5.9
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/data
+
+  api:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Dentro de la red de Docker, los servicios se llaman por su nombre.
+      REDIS_URL: redis://redis:6379
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      chroma:
+        condition: service_started  # la API reintenta hasta que Chroma responda
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  chroma-data:

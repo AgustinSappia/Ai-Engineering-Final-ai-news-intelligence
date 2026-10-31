@@ -1,0 +1,45 @@
+[project]
+name = "ai-news-intelligence"
+version = "1.0.0"
+description = "Sistema de inteligencia sobre noticias de IA: RAG híbrido + agentes con Supervisor + API asíncrona + trazabilidad."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "langgraph>=1.2,<2",
+    "langchain-core>=1.6,<2",
+    "langchain-openai>=1.6,<2",
+    "langchain-anthropic>=1.7,<2",
+    "chromadb-client>=1.5,<2",
+    "rank-bm25>=0.2.2",
+    "tiktoken>=0.8",
+    "numpy>=2.0",
+    "redis>=5.2",
+    "langgraph-checkpoint-redis>=0.5.2",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6",
+    "python-dotenv>=1.0",
+    "langsmith>=0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "fakeredis>=2.26", "ruff>=0.8"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
+# RUF001-003: el código y la documentación están en español (tildes, «», etc.).
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends()/Query()/Header() en los parámetros es el patrón idiomático de FastAPI.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header"]
+
+[tool.ruff.lint.per-file-ignores]
+# Los campos de los dobles de prueba son atributos de modelos Pydantic, no clases mutables.
+"tests/fakes.py" = ["RUF012"]

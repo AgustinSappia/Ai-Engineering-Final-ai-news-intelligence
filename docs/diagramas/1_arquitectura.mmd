@@ -1,0 +1,52 @@
+flowchart TB
+    U(["Usuario / cliente HTTP"]):::actor
+
+    subgraph API["1 · API · FastAPI (todo async)"]
+        direction LR
+        E["Endpoints<br/><small>POST /tasks · GET /tasks/{id}<br/>GET /tasks/{id}/events (SSE)<br/>POST /tasks/{id}/approve</small>"]:::api
+        W["Worker<br/><small>BackgroundTask · astream</small>"]:::api
+        E -- "encola / reanuda" --> W
+    end
+
+    RD[("Redis 8<br/><small>estado de jobs · eventos<br/>checkpoints de LangGraph</small>")]:::datos
+
+    subgraph NUCLEO["2 · Razonamiento · LangGraph"]
+        direction LR
+        S{{"Supervisor<br/><small>reglas + LLM</small>"}}:::sup
+        AG["Investigador<br/>Analista<br/>Redactor"]:::agente
+        H["Aprobación humana<br/><small>interrupt()</small>"]:::hitl
+        S <--> AG
+        S --> H
+    end
+
+    subgraph RAG["3 · Conocimiento · RAG híbrido"]
+        direction LR
+        V[("Chroma<br/><small>vectores + metadatos</small>")]:::datos
+        B["BM25"]:::rag
+        F["Fusión RRF<br/><small>+ umbral</small>"]:::rag
+        V --> F
+        B --> F
+    end
+
+    OAI["OpenAI<br/><small>LLM + embeddings (async)</small>"]:::ext
+    LS["LangSmith<br/><small>trazas · tokens · costo</small>"]:::ext
+
+    U <==> E
+    E <-- "estado · eventos" --> RD
+    W -- "astream(thread_id = job_id)" --> S
+    S -- "checkpoint por paso" --> RD
+    AG -- "buscar_noticias" --> F
+    AG -.-> OAI
+    AG -. "spans" .-> LS
+
+    classDef actor fill:#f1f5f9,stroke:#475569,color:#0f172a
+    classDef api fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef sup fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef agente fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef hitl fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d
+    classDef rag fill:#ede9fe,stroke:#6d28d9,color:#3b0764
+    classDef datos fill:#fff7ed,stroke:#c2410c,color:#7c2d12
+    classDef ext fill:#f5f5f4,stroke:#57534e,color:#1c1917
+    style API fill:#f8fafc,stroke:#94a3b8
+    style NUCLEO fill:#fffbeb,stroke:#fcd34d
+    style RAG fill:#faf5ff,stroke:#c4b5fd

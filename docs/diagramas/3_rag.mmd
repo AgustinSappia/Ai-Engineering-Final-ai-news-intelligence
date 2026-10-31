@@ -1,0 +1,38 @@
+flowchart TB
+    subgraph ING["Ingesta: al arrancar la API, solo si cambió la huella del corpus"]
+        direction LR
+        C["data/corpus/*.md<br/><small>30 noticias + metadatos</small>"]:::datos
+        CH["Chunking por tokens<br/><small>respeta párrafos</small>"]:::paso
+        EM["Embeddings async"]:::paso
+        C --> CH --> EM
+    end
+
+    DB[("Chroma<br/><small>vectores + fecha, fuente, etiquetas</small>")]:::datos
+    BM["Índice BM25<br/><small>en memoria</small>"]:::paso
+    EM --> DB --> BM
+
+    subgraph BUS["Búsqueda híbrida: la herramienta del Investigador"]
+        direction LR
+        Q["ParametrosBusqueda<br/><small>validado con Pydantic</small>"]:::entrada
+        VS["Semántica<br/><small>Chroma + filtros where</small>"]:::paso
+        KW["Palabras clave<br/><small>BM25 + mismos filtros</small>"]:::paso
+        RRF["Fusión RRF"]:::paso
+        UM{"similitud ≥ umbral"}:::decision
+        OUT["Fragmentos por noticia"]:::entrada
+        NADA(["vacío: 'sin información'"]):::borde
+        Q --> VS & KW
+        VS & KW --> RRF --> UM
+        UM -- "sí" --> OUT
+        UM -- "no" --> NADA
+    end
+
+    DB -.-> VS
+    BM -.-> KW
+
+    classDef datos fill:#fff7ed,stroke:#c2410c,color:#7c2d12
+    classDef paso fill:#ede9fe,stroke:#6d28d9,color:#3b0764
+    classDef decision fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef entrada fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef borde fill:#f1f5f9,stroke:#475569,color:#0f172a
+    style ING fill:#fafafa,stroke:#a3a3a3
+    style BUS fill:#faf5ff,stroke:#c4b5fd

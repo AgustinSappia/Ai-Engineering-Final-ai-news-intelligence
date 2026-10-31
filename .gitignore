@@ -1,0 +1,18 @@
+# Secretos
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Salidas locales de los scripts de prueba
+resultados/
+
+# Editor / sistema
+.vscode/
+.idea/
+.DS_Store

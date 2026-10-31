@@ -1,0 +1,5 @@
+# Finales de línea fijos: run.sh tiene que tener LF (si no, bash falla con $'\r').
+*.sh  text eol=lf
+*.ps1 text eol=crlf
+*.py  text eol=lf
+*.md  text eol=lf

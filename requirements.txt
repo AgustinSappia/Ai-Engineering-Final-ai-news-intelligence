@@ -1,0 +1,32 @@
+# Dependencias de ejecución, con versiones exactas (instalación reproducible).
+# Rangos compatibles y metadatos del proyecto: ver pyproject.toml.
+# Python >= 3.12
+
+# API
+fastapi==0.156.8
+uvicorn[standard]==0.53.0
+httpx==0.28.1
+
+# Agentes y LLMs
+langgraph==1.2.12
+langchain-core==1.6.6
+langchain-openai==1.6.7
+langchain-anthropic==1.7.5
+
+# RAG
+chromadb-client==1.5.9
+rank-bm25==0.2.2
+tiktoken==0.14.0
+numpy==2.5.3
+
+# Persistencia (estado de jobs, eventos y checkpointer de LangGraph)
+redis==8.1.0
+langgraph-checkpoint-redis==0.5.2
+
+# Configuración y validación
+pydantic==2.13.5
+pydantic-settings==2.16.2
+python-dotenv==1.2.3
+
+# Observabilidad
+langsmith==0.14.4

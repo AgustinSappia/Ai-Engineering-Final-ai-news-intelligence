@@ -1,0 +1,41 @@
+sequenceDiagram
+    autonumber
+    actor C as Cliente
+    participant API as FastAPI
+    participant W as Worker
+    participant G as Grafo
+    participant R as Redis
+    actor H as Revisor
+
+    rect rgb(224, 242, 254)
+        Note over C,R: 1. Encolar: responde al instante
+        C->>API: POST /tasks {tema}
+        API->>R: job PENDING
+        API-->>C: 202 + job_id
+        API->>W: BackgroundTask
+    end
+
+    rect rgb(254, 243, 199)
+        Note over C,R: 2. Ejecución en segundo plano (seguible por SSE)
+        W->>G: astream(thread_id = job_id)
+        loop cada nodo
+            G->>R: checkpoint
+            W->>R: evento en job:{id}:eventos
+        end
+        Note over G: informe negativo → interrupt()
+        W->>R: AWAITING_APPROVAL + propuesta
+        C->>API: GET /tasks/{id}/events
+        API-->>C: event: aprobacion_requerida
+    end
+
+    rect rgb(254, 226, 226)
+        Note over API,H: 3. Aprobación y reanudación (sobrevive a un reinicio)
+        H->>API: POST /tasks/{id}/approve
+        API->>R: AWAITING_APPROVAL → RUNNING (atómico)
+        API-->>H: 202
+        API->>W: reanudar_job
+        W->>G: Command(resume = decisión)
+        G->>R: lee el checkpoint y publica
+        W->>R: DONE + resultado
+    end
+    API-->>C: event: estado DONE (fin del stream)
