@@ -10,7 +10,9 @@ Endpoints de las tareas (jobs):
     GET  /tasks/{id}/checkpoint    lo que el checkpointer tiene guardado de ese hilo
 """
 
+import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 
@@ -18,6 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 
 from app.config import Settings
 from app.dependencies import obtener_grafo, obtener_jobs, obtener_settings_app
@@ -25,6 +28,7 @@ from app.jobs import ESTADOS_FINALES, Job, JobStore
 from app.state import SolicitudInforme
 from app.worker import ejecutar_job
 
+logger = logging.getLogger("api.tareas")
 router = APIRouter(tags=["tareas"])
 
 
@@ -113,13 +117,22 @@ async def eventos_tarea(
 
     finales = {e.value for e in ESTADOS_FINALES}
     limite = time.monotonic() + settings.timeout_job_segundos + 3600  # nunca un stream eterno
+    espera_ms = int(settings.sse_keepalive_s * 1000)
 
     async def generar() -> AsyncIterator[str]:
         ultimo = last_event_id or "0"
         while time.monotonic() < limite:
             if await request.is_disconnected():
                 return
-            eventos = await jobs.leer_eventos(job_id, desde=ultimo, bloquear_ms=15_000)
+            try:
+                eventos = await jobs.leer_eventos(job_id, desde=ultimo, bloquear_ms=espera_ms)
+            except RedisError as exc:
+                # Un corte momentáneo de Redis no tiene que romper el stream: se
+                # avisa con un comentario SSE y se reintenta desde el mismo id.
+                logger.warning("[job %s] SSE: error leyendo eventos (%s); se reintenta", job_id, exc)
+                yield ": reintentando\n\n"
+                await asyncio.sleep(1)
+                continue
             if not eventos:
                 yield ": keep-alive\n\n"  # comentario SSE: mantiene viva la conexión
                 continue

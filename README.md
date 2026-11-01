@@ -132,6 +132,11 @@ En Redis 8 se guardan cuatro tipos de datos:
 
 **Por qué un job pausado sobrevive a un reinicio.** Cuando el grafo llega a `interrupt()`, el checkpoint ya está en Redis. La aprobación reanuda el mismo `thread_id` con `Command(resume=decisión)`, y no importa si la API se reinició en el medio. Cómo probarlo: [sección 8](#prueba-de-persistencia-reiniciar-la-api-con-un-job-pausado).
 
+**Jobs interrumpidos por un reinicio.** Los jobs corren como BackgroundTasks, que viven en la memoria del proceso. Si la API se cae a mitad de un job (un crash, un deploy, `docker compose kill api`), al volver a arrancar busca los jobs que quedaron en `PENDING`/`RUNNING` y **los retoma desde su último checkpoint** con `astream(None)`: no repite los nodos que ya terminaron ni vuelve a pagar esos tokens. El cliente ve un evento `recuperado` en el stream. Hay dos reglas para los casos borde:
+
+- si un mismo job vuelve a tumbar el proceso, no se reintenta en bucle: queda `FAILED` con el motivo;
+- si la aprobación humana llegó pero el proceso murió antes de reanudar, el grafo sigue en el `interrupt()`, así que se vuelve a pedir la aprobación.
+
 **Aprobaciones simultáneas.** La transición `AWAITING_APPROVAL → RUNNING` es atómica (`WATCH/MULTI/EXEC`). Si llegan dos aprobaciones a la vez, solo una reanuda el grafo y la otra recibe **409**.
 
 **Lista blanca del checkpointer.** El checkpointer solo reconstruye las clases propias declaradas en `TIPOS_SERIALIZABLES`, y en **los dos formatos** que usa Redis (msgpack y JSON). En la Pre-entrega 7 faltaba el formato JSON y los objetos volvían como `dict` al reanudar. Hoy lo cubre un test de regresión.
@@ -265,6 +270,33 @@ curl -X POST localhost:8000/tasks/<job_id>/approve -H "Content-Type: application
 curl localhost:8000/tasks/<job_id>                  # "status": "DONE"
 ```
 
+### Prueba de caída: matar la API en medio de un job
+
+Esta prueba nació de un problema real (ver [sección 10](#10-decisiones-técnicas)). Con la demo corriendo, se mata el proceso de la API con `SIGKILL` mientras el Analista trabaja, y se vuelve a levantar:
+
+```bash
+python scripts/demo_escenarios.py --solo 1      # en una terminal
+docker compose kill api; docker compose up -d api   # en otra, durante el paso del Analista
+```
+
+Salida real (entorno de desarrollo, con LLM falso, un Analista que tarda 8 s a propósito y `kill -9` al proceso):
+
+```
+[1] Informe positivo (sin pausa)
+     🧭 [paso 1] Investigador: Todavía no se investigó el tema.
+     🔎 Investigador: 'avances en chips y hardware eficiente para IA' -> ['N07', 'N14']
+     🧭 [paso 2] Analista: Hay resultados de búsqueda sin analizar.
+     ⚠️  Se cortó la conexión con la API (RemoteProtocolError). Esperando a que vuelva para retomar...
+     ♻️  La API se reinició: el job se retoma desde el checkpoint (en ['Analista'])
+     📊 Analista: sentimiento positivo (score 0.85)
+     🧭 [paso 3] Redactor: Hay análisis pero todavía no hay informe.
+     ✍️  Redactor: 2 hallazgos, 0 citas descartadas
+     🧭 [paso 4] FINALIZAR: Decisión guionada para el test.
+     ✅ estado final DONE
+```
+
+El job retomó en el Analista: la búsqueda no se repitió. El script se reconectó al stream con `Last-Event-ID` y no perdió ni repitió eventos. En ese entorno el checkpointer persistente fue SQLite, porque el Redis local no trae los módulos de Redis 8. En Docker es `AsyncRedisSaver` y el mecanismo es el mismo.
+
 ### Verificación en el entorno de desarrollo (sin API keys)
 
 Para validar la mecánica sin gastar en el LLM, se levantó la app real (`lifespan`, uvicorn, Redis y **Chroma real**), con LLM y embeddings falsos y checkpointer en memoria. La corrida se hizo con **Python 3.12** y con `chromadb-client`, el cliente que usa la imagen Docker. Salida real:
@@ -340,6 +372,9 @@ Con `metadata.thread_id`, LangSmith agrupa en un mismo **Thread** la ejecución 
 | PE7: el 44 % de la latencia era una segunda llamada al LLM cuyo texto se descartaba | El Investigador hace **una** llamada con `tool_choice` forzado, y el Analista y el Redactor usan salida estructurada directa. |
 | PE7: al reanudar desde Redis, los objetos volvían como `dict` | La lista blanca cubre los formatos msgpack **y JSON**, con un test de regresión que usa el código real de `AsyncRedisSaver`. |
 | PE7: con el valor de ejemplo de la key, el tracing parecía activo y las trazas se perdían | La key se verifica contra LangSmith al arrancar. |
+| **Entrega final, primera corrida real:** el stream SSE se cortaba a mitad del job y el cliente recibía `Server disconnected without sending a response` | Causa: redis-py 8 trae `socket_timeout=5` por defecto y el SSE espera eventos con `XREAD BLOCK` de 15 s. Cuando un nodo tardaba más de 5 s (el Analista con 10 noticias), la lectura fallaba. Ahora el timeout se configura (`REDIS_SOCKET_TIMEOUT_S`), `Settings` valida que sea mayor que la espera del SSE y el stream sobrevive a un error de Redis. Tiene tests de regresión con fakeredis y con un Redis real. |
+| Entrega final: al refinar, el LLM pidió `k=10` y duplicó el prompt del Analista | `k` es un presupuesto del sistema (`RAG_K`), igual que los filtros del usuario: el LLM no puede ampliarlo. |
+| Entrega final: si la API se reiniciaba, los jobs en curso quedaban en `RUNNING` para siempre | Al arrancar se retoman desde su último checkpoint ([sección 5](#5-persistencia-y-human-in-the-loop)). |
 
 ---
 
@@ -347,7 +382,8 @@ Con `metadata.thread_id`, LangSmith agrupa en un mismo **Thread** la ejecución 
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                      # 135 tests, ~6 s, sin API keys, sin Redis, sin Chroma, sin red
+pytest                      # 147 tests, ~6 s, sin API keys, sin Redis, sin Chroma, sin red
+                            # (2 de integración se activan con CHROMA_TEST_HOST y REDIS_TEST_URL)
 ```
 
 Los tests usan dobles de prueba en lugar de los servicios reales:
@@ -368,12 +404,13 @@ Toda la suite se corrió con **Python 3.12**, en un entorno limpio instalado sol
 | `test_corpus.py` | Carga y validación de noticias, chunking por tokens, huella del corpus, normalización |
 | `test_recuperador.py` | Fusión híbrida, filtros de fecha, fuente y etiquetas, umbral, BM25 con nombres propios, ingesta idempotente |
 | `test_chroma_integracion.py` | Contra un **Chroma real**: ingesta y búsquedas idénticas al almacén en memoria (se activa con `CHROMA_TEST_HOST`) |
-| `test_agentes.py` | Filtros del usuario obligatorios, plan B ante argumentos inválidos, análisis de noticias no recibidas, **filtro de veracidad**, cero llamadas al LLM cuando no hay datos |
+| `test_redis_integracion.py` | Contra un **Redis real**: la espera del SSE supera los 5 s sin cortarse (regresión del timeout de redis-py; se activa con `REDIS_TEST_URL`) |
+| `test_agentes.py` | Filtros del usuario obligatorios, el LLM no puede ampliar `k`, plan B ante argumentos inválidos, análisis de noticias no recibidas, **filtro de veracidad**, cero llamadas al LLM cuando no hay datos |
 | `test_graph.py` | Camino positivo, HITL aprobado y rechazado, forzar aprobación, tema fuera de la base, refinamiento pedido por el LLM, guardrails, tope de pasos, **reanudar con otra instancia del grafo**, hilos concurrentes |
 | `test_checkpointer_redis.py` | El estado completo pasa por la conversión a JSON de `AsyncRedisSaver` y vuelve como objetos (regresión de la PE7) |
 | `test_jobs.py` | Estado en Redis, TTL, **doble aprobación simultánea**, eventos en el stream |
-| `test_worker.py` | DONE, AWAITING → DONE, REJECTED, **excepción → FAILED**, **timeout → FAILED**, eventos por nodo, 5 jobs concurrentes |
-| `test_api.py` | 202, 404, 409, 422, SSE, checkpoint, búsqueda directa, health, `X-Request-ID`, modelo de respuesta en todos los endpoints |
+| `test_worker.py` | DONE, AWAITING → DONE, REJECTED, **excepción → FAILED**, **timeout → FAILED**, eventos por nodo, 5 jobs concurrentes, **recuperación tras un reinicio** (retoma en el nodo correcto, sin bucles, aprobación perdida) |
+| `test_api.py` | 202, 404, 409, 422, SSE (y que sobreviva a un error de Redis), checkpoint, búsqueda directa, health, `X-Request-ID`, modelo de respuesta en todos los endpoints |
 | `test_no_bloqueante.py` | **Servidor uvicorn real**: 5 POST concurrentes no esperan al grafo y `/health` responde mientras corren |
 | `test_observability.py` | Validación de la key de LangSmith (falta, valor de ejemplo, rechazada, sin red) |
 | `test_auditoria_async.py` | **Auditoría estática**: ninguna llamada síncrona dentro de `async def`, todos los endpoints async |
@@ -402,7 +439,7 @@ ai-news-intelligence/
 │   └── rag/                 # schemas · texto · corpus · almacen · recuperador · ingesta
 ├── data/corpus/             # 30 noticias ficticias (Markdown + metadatos)
 ├── scripts/                 # demo_escenarios · carga_concurrente · evaluar_rag
-├── tests/                   # 135 tests (fakes.py, conftest.py y 13 archivos de tests)
+├── tests/                   # 147 tests (fakes.py, conftest.py y 14 archivos de tests)
 ├── docs/diagramas/          # Diagramas (fuente .mmd + imagen .png)
 ├── screenshots/             # Capturas de LangSmith
 ├── Dockerfile · docker-compose.yml · run.sh · run.ps1
@@ -436,6 +473,6 @@ ai-news-intelligence/
 ## 14. Limitaciones conocidas
 
 - **Corpus chico y ficticio.** Son 30 noticias. La arquitectura no depende del tamaño, pero BM25 en memoria es por proceso; con millones de documentos habría que usar un motor con búsqueda full-text (por ejemplo, Redis Query Engine o Elasticsearch).
-- **Worker en proceso.** Se usan BackgroundTasks de FastAPI: una sola instancia de la API ejecuta sus jobs. Para escalar horizontalmente, el paso siguiente es un worker separado que lea de una cola en Redis (Arq o Celery). El estado y los checkpoints ya viven en Redis, así que no cambiarían.
+- **Worker en proceso.** Se usan BackgroundTasks de FastAPI: una sola instancia de la API ejecuta sus jobs. Si el proceso se cae, al volver retoma los jobs desde su checkpoint; con varias instancias, esa recuperación necesitaría un lock por job. Para escalar horizontalmente, el paso siguiente es un worker separado que lea de una cola en Redis (Arq o Celery). El estado y los checkpoints ya viven en Redis, así que no cambiarían.
 - **Umbral de relevancia.** Depende del modelo de embeddings. Se calibra con `scripts/evaluar_rag.py` y se ajusta en `RAG_UMBRAL_SIMILITUD`.
 - **Sentimiento.** Lo decide el LLM noticia por noticia. El agregado y la regla de criticidad son reproducibles, pero la clasificación individual puede variar entre corridas.

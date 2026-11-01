@@ -13,6 +13,9 @@ Al arrancar (`lifespan`), en este orden:
 5. Índice híbrido (BM25 en memoria a partir de lo que hay en Chroma).
 6. Checkpointer de Redis y grafo de agentes compilado (uno solo para toda
    la API: cada job usa su propio thread_id).
+7. Recuperación: si la API se había caído con jobs a medio camino, los
+   retoma desde su último checkpoint (en segundo plano: no demora el
+   arranque).
 """
 
 import asyncio
@@ -23,17 +26,17 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from redis.asyncio import Redis
 
 from app.api import aprobacion, conocimiento, sistema, tareas
 from app.config import Settings, obtener_settings
 from app.graph import checkpointer_redis, construir_grafo
-from app.jobs import JobStore
+from app.jobs import JobStore, crear_cliente_redis
 from app.llm import crear_chat_model, crear_embeddings
 from app.observability import cerrar_observabilidad, configurar_logs, inicializar_observabilidad, verificar_conexion
 from app.rag.almacen import AlmacenChroma
 from app.rag.ingesta import asegurar_indice
 from app.rag.recuperador import RecuperadorHibrido
+from app.worker import recuperar_job
 
 logger = logging.getLogger("api")
 
@@ -72,6 +75,19 @@ def explicar_error_de_proveedor(exc: BaseException) -> str | None:
     return None
 
 
+async def iniciar_recuperacion(app: FastAPI, jobs: JobStore, settings: Settings) -> list[asyncio.Task]:
+    """Lanza en segundo plano la recuperación de los jobs interrumpidos."""
+    interrumpidos = await jobs.en_curso()
+    if interrumpidos:
+        logger.warning("La API se había detenido con %d job(s) en curso: se retoman.", len(interrumpidos))
+    tareas = [
+        asyncio.create_task(recuperar_job(j.job_id, grafo=app.state.grafo, jobs=jobs, settings=settings))
+        for j in interrumpidos
+    ]
+    app.state.recuperaciones = tareas  # referencia fuerte: si no, el GC puede cortar la tarea
+    return tareas
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = obtener_settings()
@@ -79,7 +95,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.observabilidad = await verificar_conexion(inicializar_observabilidad(settings))
 
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    redis = crear_cliente_redis(settings.redis_url, settings.redis_socket_timeout_s)
     await con_reintentos("Redis", redis.ping)
 
     async def conectar_chroma() -> AlmacenChroma:
@@ -126,7 +142,10 @@ async def lifespan(app: FastAPI):
             settings.llm_provider,
             settings.modelo_llm,
         )
+        recuperaciones = await iniciar_recuperacion(app, jobs, settings)
         yield
+        for tarea in recuperaciones:  # quedan en RUNNING y se retoman en el próximo arranque
+            tarea.cancel()
 
     await redis.aclose()
     cerrar_observabilidad()

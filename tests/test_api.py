@@ -93,6 +93,28 @@ async def test_eventos_sse(cliente):
     assert '"status": "DONE"' in texto  # el stream se cierra en el estado final
 
 
+async def test_sse_sobrevive_a_un_error_de_redis(app_test, cliente):
+    """Regresión del bug de la demo: una lectura de Redis que falla (antes,
+    el timeout de 5 s de redis-py) cortaba el stream a mitad del job."""
+    from redis.exceptions import TimeoutError as RedisTimeout
+
+    jobs = app_test.state.jobs
+    job_id = (await cliente.post("/tasks", json={"tema": "chips de hardware eficientes"})).json()["job_id"]
+    original, fallas = jobs.leer_eventos, []
+
+    async def leer_con_una_falla(*args, **kwargs):
+        if not fallas:
+            fallas.append(1)
+            raise RedisTimeout("Timeout reading from redis:6379")
+        return await original(*args, **kwargs)
+
+    jobs.leer_eventos = leer_con_una_falla
+    async with cliente.stream("GET", f"/tasks/{job_id}/events") as r:
+        texto = "".join([trozo async for trozo in r.aiter_text()])
+    assert fallas and ": reintentando" in texto
+    assert '"status": "DONE"' in texto  # igual llega hasta el estado final
+
+
 async def test_errores_404_y_409(cliente):
     assert (await cliente.get("/tasks/no-existe")).status_code == 404
     assert (await cliente.get("/tasks/no-existe/events")).status_code == 404

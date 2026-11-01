@@ -12,7 +12,9 @@ en LangSmith:
   5. Tema fuera de la base   -> no alucina: responde "sin información".
 
 Sigue cada job EN VIVO por el endpoint de streaming (SSE) e imprime las
-decisiones del Supervisor a medida que ocurren.
+decisiones del Supervisor a medida que ocurren. Si la API se reinicia en
+medio de un job, se reconecta (Last-Event-ID) y el servidor retoma el job
+desde su último checkpoint.
 
 Uso (con la API levantada):
     python scripts/demo_escenarios.py
@@ -111,34 +113,87 @@ ESCENARIOS = [
 ]
 
 
+MAX_RECONEXIONES = 5
+
+
+async def esperar_api(cliente: httpx.AsyncClient, limite_s: float = 180) -> None:
+    """Espera a que la API vuelva a responder (p. ej. si el contenedor se reinició)."""
+    limite = time.monotonic() + limite_s
+    while time.monotonic() < limite:
+        try:
+            if (await cliente.get("/health", timeout=5)).status_code == 200:
+                return
+        except httpx.TransportError:
+            pass
+        await asyncio.sleep(2)
+    raise RuntimeError(f"La API no volvió a responder en {limite_s:.0f} s. Mirá: docker compose logs --tail 80 api")
+
+
+async def manejar_evento(cliente: httpx.AsyncClient, job_id: str, escenario: Escenario, tipo: str, datos: dict) -> bool:
+    """Imprime un evento y responde la aprobación humana. True = el job terminó."""
+    if tipo == "nodo" and datos.get("nodo") == "Supervisor":
+        print(f"     🧭 {datos['razon']}")
+    elif tipo == "nodo" and datos.get("nodo") == "Investigador":
+        print(f"     🔎 Investigador: '{datos['consulta']}' -> {datos['noticias']}")
+    elif tipo == "nodo" and datos.get("nodo") == "Analista" and datos.get("sentimiento_general"):
+        print(f"     📊 Analista: sentimiento {datos['sentimiento_general']} (score {datos['score_promedio']})")
+    elif tipo == "nodo" and datos.get("nodo") == "Redactor":
+        hallazgos, descartadas = datos["hallazgos"], datos["citas_descartadas"]
+        print(f"     ✍️  Redactor: {hallazgos} hallazgos, {descartadas} citas descartadas")
+    elif tipo == "recuperado":
+        print(f"     ♻️  La API se reinició: el job se retoma desde el checkpoint (en {datos['retoma_en']})")
+    elif tipo == "aprobacion_requerida":
+        print(f"     ⏸  Pide aprobación: {datos['motivo']}")
+        if escenario.decision_humana is None:
+            print("     ⚠️  No se esperaba una pausa en este escenario: se aprueba para continuar.")
+        aprobar = escenario.decision_humana is not False
+        r = await cliente.post(
+            f"/tasks/{job_id}/approve",
+            json={"aprobado": aprobar, "comentario": "Decisión de la demo", "revisor": "demo"},
+        )
+        print(f"     {'✅ Aprobado' if aprobar else '⛔ Rechazado'} (HTTP {r.status_code})")
+    elif tipo == "estado" and datos.get("status") in ESTADOS_FINALES:
+        return True
+    return False
+
+
 async def seguir_eventos(cliente: httpx.AsyncClient, job_id: str, escenario: Escenario) -> None:
-    """Imprime los eventos del job en vivo y responde la aprobación humana."""
-    async with cliente.stream("GET", f"/tasks/{job_id}/events", timeout=None) as respuesta:
-        tipo = None
-        async for linea in respuesta.aiter_lines():
-            if linea.startswith("event:"):
-                tipo = linea.split(":", 1)[1].strip()
-            elif linea.startswith("data:"):
-                datos = json.loads(linea.split(":", 1)[1])
-                if tipo == "nodo" and datos.get("nodo") == "Supervisor":
-                    print(f"     🧭 {datos['razon']}")
-                elif tipo == "nodo" and datos.get("nodo") == "Investigador":
-                    print(f"     🔎 Investigador: '{datos['consulta']}' -> {datos['noticias']}")
-                elif tipo == "nodo" and datos.get("nodo") == "Redactor":
-                    hallazgos, descartadas = datos["hallazgos"], datos["citas_descartadas"]
-                    print(f"     ✍️  Redactor: {hallazgos} hallazgos, {descartadas} citas descartadas")
-                elif tipo == "aprobacion_requerida":
-                    print(f"     ⏸  Pide aprobación: {datos['motivo']}")
-                    if escenario.decision_humana is None:
-                        print("     ⚠️  No se esperaba una pausa en este escenario: se aprueba para continuar.")
-                    aprobar = escenario.decision_humana is not False
-                    r = await cliente.post(
-                        f"/tasks/{job_id}/approve",
-                        json={"aprobado": aprobar, "comentario": "Decisión de la demo", "revisor": "demo"},
-                    )
-                    print(f"     {'✅ Aprobado' if aprobar else '⛔ Rechazado'} (HTTP {r.status_code})")
-                elif tipo == "estado" and datos.get("status") in ESTADOS_FINALES:
-                    return
+    """Sigue el job EN VIVO por SSE. Si la conexión se corta (la API se
+    reinició, se cayó la red), espera a que vuelva y se reconecta mandando
+    `Last-Event-ID`: el servidor retoma desde el último evento recibido,
+    sin repetir ni perder ninguno (están guardados en un Redis Stream)."""
+    ultimo_id: str | None = None
+    for _ in range(MAX_RECONEXIONES + 1):
+        cabeceras = {"Last-Event-ID": ultimo_id} if ultimo_id else {}
+        try:
+            async with cliente.stream("GET", f"/tasks/{job_id}/events", headers=cabeceras, timeout=None) as r:
+                r.raise_for_status()
+                tipo = evento_id = None
+                async for linea in r.aiter_lines():
+                    if linea.startswith("id:"):
+                        evento_id = linea.split(":", 1)[1].strip()
+                    elif linea.startswith("event:"):
+                        tipo = linea.split(":", 1)[1].strip()
+                    elif linea.startswith("data:"):
+                        terminado = await manejar_evento(cliente, job_id, escenario, tipo, json.loads(linea[5:]))
+                        ultimo_id = evento_id
+                        if terminado:
+                            return
+            motivo = "el servidor cerró el stream antes del final"
+        except httpx.TransportError as exc:
+            motivo = type(exc).__name__
+        print(f"     ⚠️  Se cortó la conexión con la API ({motivo}). Esperando a que vuelva para retomar...")
+        await esperar_api(cliente)
+    raise RuntimeError(f"Se perdió la conexión {MAX_RECONEXIONES + 1} veces seguidas con el job {job_id}")
+
+
+async def obtener_job(cliente: httpx.AsyncClient, job_id: str) -> dict:
+    for _ in range(MAX_RECONEXIONES):
+        try:
+            return (await cliente.get(f"/tasks/{job_id}")).raise_for_status().json()
+        except httpx.TransportError:
+            await esperar_api(cliente)
+    return (await cliente.get(f"/tasks/{job_id}")).raise_for_status().json()
 
 
 async def correr(cliente: httpx.AsyncClient, escenario: Escenario) -> dict:
@@ -146,8 +201,9 @@ async def correr(cliente: httpx.AsyncClient, escenario: Escenario) -> dict:
     print(f"     Solicitud: {escenario.solicitud}")
     inicio = time.perf_counter()
     creado = (await cliente.post("/tasks", json=escenario.solicitud)).raise_for_status().json()
-    await asyncio.wait_for(seguir_eventos(cliente, creado["job_id"], escenario), timeout=600)
-    job = (await cliente.get(f"/tasks/{creado['job_id']}")).json()
+    print(f"     job_id: {creado['job_id']}")
+    await asyncio.wait_for(seguir_eventos(cliente, creado["job_id"], escenario), timeout=900)
+    job = await obtener_job(cliente, creado["job_id"])
     duracion = time.perf_counter() - inicio
 
     controles = [(job["status"] == escenario.esperado, f"estado final {escenario.esperado}")]

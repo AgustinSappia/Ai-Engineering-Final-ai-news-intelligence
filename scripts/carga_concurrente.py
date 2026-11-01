@@ -53,7 +53,17 @@ async def lanzar(cliente: httpx.AsyncClient, tema: str) -> dict:
 
 async def seguir(cliente: httpx.AsyncClient, item: dict, aprobar: bool, intervalo: float, limite_s: float) -> dict:
     while True:
-        job = (await cliente.get(f"/tasks/{item['job_id']}")).json()
+        try:
+            job = (await cliente.get(f"/tasks/{item['job_id']}")).raise_for_status().json()
+        except httpx.TransportError as exc:
+            # La API se está reiniciando: al volver retoma el job desde su checkpoint.
+            item["cortes"] = item.get("cortes", 0) + 1
+            print(f"  ⚠️  [{item['tema'][:40]}] sin respuesta de la API ({type(exc).__name__}); se reintenta")
+            if time.perf_counter() - item["_t0"] > limite_s:
+                item["estado"] = "TIMEOUT (API sin respuesta)"
+                return item
+            await asyncio.sleep(max(intervalo, 2))
+            continue
         if job["status"] == "AWAITING_APPROVAL" and "hitl" not in item:
             item["hitl"] = True
             print(f"  ⏸  [{item['tema'][:40]}] pide aprobación: {job['aprobacion_pendiente']['motivo'][:70]}")

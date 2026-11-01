@@ -46,8 +46,19 @@ async def test_los_filtros_del_usuario_son_obligatorios(recuperador):
     assert all(f.fecha >= date(2026, 5, 1) for f in resultado.busqueda.fragmentos)
 
 
+async def test_el_llm_no_puede_ampliar_el_k_del_sistema(recuperador):
+    """Caso real: al refinar, el LLM pidió k=10 y el prompt del Analista se duplicó."""
+    llm = ModeloGuionado(args_extra={"k": 10})
+    resultado = await investigar(
+        llm, crear_herramienta_busqueda(recuperador), SolicitudInforme(tema="agentes de IA"), intento=2, k=5
+    )
+    assert resultado.args_del_llm_validos is True
+    assert resultado.busqueda.parametros.k == 5
+    assert len(resultado.busqueda.fragmentos) <= 5
+
+
 async def test_argumentos_invalidos_del_llm_usan_el_plan_b(recuperador):
-    llm = ModeloGuionado(args_extra={"k": 50})  # fuera del rango 1..10
+    llm = ModeloGuionado(args_extra={"consulta": "x"})  # menos de 2 caracteres
     resultado = await investigar(
         llm, crear_herramienta_busqueda(recuperador), SolicitudInforme(tema="agentes"), intento=1, k=5
     )

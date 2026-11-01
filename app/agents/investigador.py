@@ -8,10 +8,13 @@ Agente Investigador: el que usa el RAG como HERRAMIENTA.
    `buscar_noticias`: reformula la consulta con sinónimos y términos clave,
    y puede acotar por etiquetas.
 2. Los argumentos se validan con Pydantic (`ParametrosBusqueda`). Si el LLM
-   propone algo inválido (un `k` de 50, fechas al revés), no se rompe el
+   propone algo inválido (una consulta vacía, etiquetas de más), no se rompe el
    job: se usa un plan B con el tema tal cual y se deja registrado.
 3. Los filtros que pidió el USUARIO (fechas, fuentes) se imponen siempre:
-   el LLM no puede "olvidarlos" ni ampliarlos.
+   el LLM no puede "olvidarlos" ni ampliarlos. Lo mismo con `k` (cuántas
+   noticias entran al contexto): es un presupuesto del sistema (RAG_K). En
+   una corrida real el LLM pidió k=10 al refinar y le duplicó el prompt al
+   Analista; ahora no puede pedir más de lo presupuestado.
 4. Se ejecuta la herramienta (búsqueda híbrida async) y se devuelve el
    resultado tipado.
 
@@ -84,8 +87,9 @@ def _mensajes(solicitud: SolicitudInforme, intento: int, motivo_refinamiento: st
     return [SystemMessage(content=PROMPT_INVESTIGADOR), HumanMessage(content=contenido)]
 
 
-def _imponer_filtros_del_usuario(args: dict, solicitud: SolicitudInforme, intento: int) -> dict:
+def _imponer_filtros_del_usuario(args: dict, solicitud: SolicitudInforme, intento: int, k: int) -> dict:
     args = dict(args)
+    args["k"] = k  # presupuesto de contexto del sistema, no lo decide el LLM
     args["fecha_desde"] = solicitud.fecha_desde.isoformat() if solicitud.fecha_desde else None
     args["fecha_hasta"] = solicitud.fecha_hasta.isoformat() if solicitud.fecha_hasta else None
     args["fuentes"] = list(solicitud.fuentes)
@@ -110,14 +114,16 @@ async def investigar(
     )
     args_llm = respuesta.tool_calls[0]["args"] if respuesta.tool_calls else {}
 
-    args = _imponer_filtros_del_usuario({"k": k, **args_llm}, solicitud, intento)
+    if args_llm.get("k") not in (None, k):
+        logger.info("El LLM pidió k=%s; se usa el presupuesto del sistema (k=%d).", args_llm.get("k"), k)
+    args = _imponer_filtros_del_usuario(args_llm, solicitud, intento, k)
     try:
         params = ParametrosBusqueda.model_validate(args)
         validos = bool(args_llm)
     except ValidationError as exc:
         logger.warning("Argumentos inválidos del LLM (%s); se usa la búsqueda por defecto.", exc.errors()[:2])
         params = ParametrosBusqueda.model_validate(
-            _imponer_filtros_del_usuario({"consulta": solicitud.tema, "k": k}, solicitud, intento)
+            _imponer_filtros_del_usuario({"consulta": solicitud.tema}, solicitud, intento, k)
         )
         validos = False
 

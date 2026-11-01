@@ -12,6 +12,11 @@ en Redis el estado del job y un evento por cada nodo.
   pausado en un `interrupt()`, el job pasa a AWAITING_APPROVAL.
 - REGLA: ninguna excepción se escapa sin dejar el job en FAILED (y hay un
   timeout global). Si no, el cliente quedaría haciendo polling para siempre.
+- Recuperación: las BackgroundTasks viven en la memoria del proceso. Si la
+  API se reinicia (un deploy, un crash, el contenedor que se cae), los jobs
+  que estaban corriendo quedarían en RUNNING para siempre. Al arrancar,
+  `recuperar_job` los retoma DESDE SU ÚLTIMO CHECKPOINT (`astream(None)`):
+  no se repiten los pasos ya hechos ni se vuelve a pagar por esos tokens.
 """
 
 import asyncio
@@ -81,8 +86,11 @@ async def _correr(
                 logger.info("[job %s] %s %s", job_id, nodo, resumen)
 
     await asyncio.wait_for(recorrer(), timeout=settings.timeout_job_segundos)
+    await _cerrar(job_id, await grafo.aget_state(config), jobs)
 
-    snapshot = await grafo.aget_state(config)
+
+async def _cerrar(job_id: str, snapshot: Any, jobs: JobStore) -> None:
+    """Deja el job en su estado según la foto final del checkpointer."""
     if snapshot.interrupts:
         pendiente = snapshot.interrupts[0].value
         await jobs.actualizar(
@@ -146,6 +154,52 @@ def resumir_resultado(valores: dict) -> dict[str, Any]:
         "aprobacion": volcar(valores.get("aprobacion")),
         "publicado": valores.get("reporte") is not None,
     }
+
+
+# ---------------------------------------------------------------------------
+async def recuperar_job(
+    job_id: str, *, grafo: CompiledStateGraph, jobs: JobStore, settings: Settings, max_recuperaciones: int = 1
+) -> str:
+    """Retoma un job que quedó en PENDING/RUNNING porque la API se reinició.
+    Devuelve qué se hizo (para logs y tests).
+
+    Tope de `max_recuperaciones`: si el job vuelve a tumbar el proceso, no
+    entra en un bucle de reinicios; se marca FAILED con el motivo."""
+    job = await jobs.obtener(job_id)
+    if job is None or job.status not in (EstadoJob.PENDING, EstadoJob.RUNNING):
+        return "nada"
+    try:
+        if job.recuperaciones >= max_recuperaciones:
+            await jobs.actualizar(
+                job_id,
+                status=EstadoJob.FAILED,
+                error=(
+                    f"La API se reinició {job.recuperaciones + 1} veces mientras corría este job; "
+                    "se abandona para no entrar en un bucle. Revisá los logs del contenedor."
+                ),
+            )
+            return "abandonado"
+
+        config = {"configurable": {"thread_id": job_id}}
+        snapshot = await grafo.aget_state(config)
+        await jobs.actualizar(job_id, recuperaciones=job.recuperaciones + 1)
+        desde = list(snapshot.next) if snapshot.values else ["inicio"]
+        await jobs.registrar_evento(
+            job_id, "recuperado", {"motivo": "la API se reinició mientras corría el job", "retoma_en": desde}
+        )
+        logger.warning("[job %s] se retoma tras un reinicio de la API (retoma en %s)", job_id, desde)
+
+        if not snapshot.values:  # nunca llegó a correr: se arranca de cero
+            await ejecutar_job(job_id, grafo=grafo, jobs=jobs, settings=settings)
+            return "reiniciado"
+        if snapshot.interrupts or not snapshot.next:  # estaba pausado o ya había terminado
+            await _cerrar(job_id, snapshot, jobs)
+            return "cerrado"
+        await _correr(job_id, None, grafo=grafo, jobs=jobs, settings=settings, etapa="recuperacion")
+        return "retomado"
+    except Exception as exc:
+        await _marcar_fallido(job_id, exc, jobs, settings)
+        return "fallido"
 
 
 async def _marcar_fallido(job_id: str, exc: BaseException, jobs: JobStore, settings: Settings) -> None:

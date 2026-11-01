@@ -16,6 +16,9 @@ Ciclo de vida:
     PENDING ─> RUNNING ─┬─> DONE
                         ├─> AWAITING_APPROVAL ─(approve)─> RUNNING ─> DONE / REJECTED
                         └─> FAILED   (excepción o timeout en el worker)
+
+Si la API se reinicia con jobs en PENDING/RUNNING, al arrancar los retoma
+desde su último checkpoint (ver `worker.recuperar_job`).
 """
 
 import json
@@ -34,6 +37,24 @@ from app.state import ReportePublicado, SolicitudInforme
 CLAVE_REPORTES = "reportes:publicados"
 CLAVE_INDICE_JOBS = "jobs:indice"
 MAX_EVENTOS_POR_JOB = 500
+
+
+def crear_cliente_redis(url: str, socket_timeout_s: float) -> Redis:
+    """Cliente Redis de la API.
+
+    Bug real encontrado en la demo: redis-py 8 trae `socket_timeout=5` por
+    defecto, y el stream SSE espera eventos con `XREAD BLOCK` varios
+    segundos. Si un nodo tardaba más de 5 s (el Analista con 10 noticias),
+    la lectura fallaba con TimeoutError y el stream se cortaba a mitad del
+    job. El timeout se configura (REDIS_SOCKET_TIMEOUT_S) y `Settings` valida
+    que sea mayor que la espera del SSE."""
+    return Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_timeout=socket_timeout_s,
+        socket_connect_timeout=5,
+        health_check_interval=30,
+    )
 
 
 class EstadoJob(StrEnum):
@@ -66,6 +87,9 @@ class Job(BaseModel):
     aprobacion_pendiente: dict[str, Any] | None = None
     resultado: dict[str, Any] | None = None
     error: str | None = None
+    recuperaciones: int = Field(
+        0, description="Veces que se retomó desde el checkpoint porque la API se reinició mientras corría."
+    )
 
     @property
     def es_final(self) -> bool:
@@ -109,6 +133,12 @@ class JobStore:
         ids = await self.redis.zrevrange(CLAVE_INDICE_JOBS, 0, limite - 1)
         jobs = [await self.obtener(i) for i in ids]
         return [j for j in jobs if j is not None]
+
+    async def en_curso(self, limite: int = 500) -> list[Job]:
+        """Jobs que quedaron a medio camino (PENDING o RUNNING). Al arrancar,
+        la API los retoma: las BackgroundTasks viven en memoria y se pierden
+        si el proceso se reinicia, pero el checkpoint del grafo no."""
+        return [j for j in await self.listar(limite) if j.status in (EstadoJob.PENDING, EstadoJob.RUNNING)]
 
     async def actualizar(self, job_id: str, **cambios: Any) -> Job:
         """Lo usa el worker, que es el único que escribe mientras el job corre."""

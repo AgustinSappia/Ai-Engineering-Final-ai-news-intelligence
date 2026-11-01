@@ -48,6 +48,9 @@ class Settings(BaseSettings):
 
     # --- Infraestructura ------------------------------------------------------
     redis_url: str = "redis://localhost:6379"
+    redis_socket_timeout_s: float = Field(
+        30.0, gt=0, description="Timeout de lectura del cliente Redis (redis-py 8 trae 5 s por defecto)."
+    )
     chroma_host: str = "localhost"
     chroma_port: int = Field(8000, ge=1, le=65535)
     chroma_coleccion: str = "noticias_ia"
@@ -56,7 +59,7 @@ class Settings(BaseSettings):
     corpus_dir: Path = RAIZ_PROYECTO / "data" / "corpus"
     rag_chunk_tokens: int = Field(160, ge=50, le=2000)
     rag_chunk_solapamiento: int = Field(40, ge=0, le=500)
-    rag_k: int = Field(5, ge=1, le=20, description="Noticias que devuelve una búsqueda.")
+    rag_k: int = Field(5, ge=1, le=10, description="Noticias que devuelve una búsqueda (presupuesto de contexto).")
     rag_candidatos: int = Field(20, ge=1, le=200, description="Candidatos por método antes de fusionar.")
     rag_rrf_k: int = Field(60, ge=1, description="Constante de Reciprocal Rank Fusion.")
     rag_umbral_similitud: float = Field(
@@ -68,6 +71,7 @@ class Settings(BaseSettings):
     max_intentos_investigacion: int = Field(2, ge=1, le=5)
     timeout_job_segundos: float = Field(300.0, gt=0)
     job_ttl_segundos: int = Field(7 * 24 * 3600, gt=0)
+    sse_keepalive_s: float = Field(10.0, gt=0, description="Cada cuánto el stream SSE manda un keep-alive.")
     checkpoint_ttl_minutos: int = Field(24 * 60, gt=0)
 
     # --- Observabilidad -------------------------------------------------------
@@ -82,6 +86,10 @@ class Settings(BaseSettings):
             raise ValueError("RAG_CHUNK_SOLAPAMIENTO tiene que ser menor que RAG_CHUNK_TOKENS")
         if self.rag_candidatos < self.rag_k:
             raise ValueError("RAG_CANDIDATOS tiene que ser mayor o igual que RAG_K")
+        if self.sse_keepalive_s >= self.redis_socket_timeout_s:
+            # El SSE espera eventos con XREAD BLOCK durante sse_keepalive_s: si el
+            # cliente Redis corta antes, la lectura falla y el stream se rompe.
+            raise ValueError("SSE_KEEPALIVE_S tiene que ser menor que REDIS_SOCKET_TIMEOUT_S")
         return self
 
     @property
