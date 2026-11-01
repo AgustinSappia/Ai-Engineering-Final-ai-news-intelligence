@@ -175,6 +175,7 @@ curl http://localhost:8000/health
 
 | Síntoma | Causa y solución |
 |---|---|
+| La API se detiene con `OpenAI rechazó OPENAI_API_KEY (vencida, revocada o inválida)` | La key de OpenAI no sirve. Generá una nueva en <https://platform.openai.com/api-keys>, ponela en el `.env` y volvé a correr `.\run.ps1` / `./run.sh` (recrean el contenedor de la API). Si dice `RateLimitError` / `insufficient_quota`, falta saldo en la cuenta. |
 | `unknown command 'FT.INFO'` al arrancar | El checkpointer necesita **Redis 8** (módulos de búsqueda y JSON). Usá la imagen `redis:8` del compose. |
 | `/health` dice `"conexion": "rechazada"` o `"motivo": "...valor de ejemplo..."` | Falta la key real de LangSmith en el `.env`. |
 | Cambié el `.env` y no toma los valores | Docker lee el `.env` al crear el contenedor: `docker compose up -d --force-recreate api` |
@@ -346,7 +347,7 @@ Con `metadata.thread_id`, LangSmith agrupa en un mismo **Thread** la ejecución 
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                      # 134 tests, ~6 s, sin API keys, sin Redis, sin Chroma, sin red
+pytest                      # 135 tests, ~6 s, sin API keys, sin Redis, sin Chroma, sin red
 ```
 
 Los tests usan dobles de prueba en lugar de los servicios reales:
@@ -401,7 +402,7 @@ ai-news-intelligence/
 │   └── rag/                 # schemas · texto · corpus · almacen · recuperador · ingesta
 ├── data/corpus/             # 30 noticias ficticias (Markdown + metadatos)
 ├── scripts/                 # demo_escenarios · carga_concurrente · evaluar_rag
-├── tests/                   # 134 tests (fakes.py, conftest.py y 13 archivos de tests)
+├── tests/                   # 135 tests (fakes.py, conftest.py y 13 archivos de tests)
 ├── docs/diagramas/          # Diagramas (fuente .mmd + imagen .png)
 ├── screenshots/             # Capturas de LangSmith
 ├── Dockerfile · docker-compose.yml · run.sh · run.ps1

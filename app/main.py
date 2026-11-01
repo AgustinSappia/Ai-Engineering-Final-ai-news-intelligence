@@ -53,6 +53,25 @@ async def con_reintentos[T](
     raise AssertionError("inalcanzable")
 
 
+def explicar_error_de_proveedor(exc: BaseException) -> str | None:
+    """Traduce los errores de credenciales de OpenAI a un mensaje accionable.
+    Sin esto, el motivo real queda al final de un traceback largo."""
+    import openai
+
+    if isinstance(exc, openai.AuthenticationError):
+        return (
+            "OpenAI rechazó OPENAI_API_KEY (vencida, revocada o inválida): "
+            f"{getattr(exc, 'message', exc)} -> Generá una nueva en https://platform.openai.com/api-keys, "
+            "actualizá el .env y recreá el contenedor (docker compose up -d --force-recreate api)."
+        )
+    if isinstance(exc, openai.PermissionDeniedError | openai.RateLimitError):
+        return (
+            f"OpenAI no permite usar la key ({type(exc).__name__}): {getattr(exc, 'message', exc)} -> "
+            "Revisá el saldo/límites de la cuenta y los permisos del proyecto en https://platform.openai.com."
+        )
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings: Settings = obtener_settings()
@@ -71,7 +90,13 @@ async def lifespan(app: FastAPI):
 
     almacen = await con_reintentos("Chroma", conectar_chroma)
     embeddings = crear_embeddings(settings)
-    app.state.ingesta = await asegurar_indice(almacen, embeddings, settings)
+    try:
+        app.state.ingesta = await asegurar_indice(almacen, embeddings, settings)
+    except Exception as exc:
+        if explicacion := explicar_error_de_proveedor(exc):
+            logger.error(explicacion)
+            raise RuntimeError(explicacion) from exc
+        raise
 
     recuperador = RecuperadorHibrido(
         almacen,

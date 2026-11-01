@@ -45,7 +45,9 @@ services:
         condition: service_healthy
       chroma:
         condition: service_started  # la API reintenta hasta que Chroma responda
-    restart: unless-stopped
+    # Ante un error de configuración (p. ej. una API key vencida) no queda
+    # reiniciando para siempre: lo intenta 3 veces y se detiene.
+    restart: on-failure:3
 
 volumes:
   redis-data:

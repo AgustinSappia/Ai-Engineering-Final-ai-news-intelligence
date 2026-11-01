@@ -23,10 +23,17 @@ if grep -qE '^OPENAI_API_KEY=(sk-\.\.\.)?$' .env; then
 fi
 
 echo "🚀 Construyendo y levantando Redis 8 + Chroma + API..."
-docker compose up --build -d
+# --force-recreate api: si cambiaste el .env, el contenedor lo vuelve a leer.
+docker compose up --build -d --force-recreate api
 
 echo -n "⏳ Esperando a la API (la primera vez indexa el corpus)"
 for _ in $(seq 1 90); do
+  if [ -n "$(docker compose ps -a -q --status exited --status restarting api)" ]; then
+    echo
+    echo "❌ La API se detuvo al arrancar. Motivo (últimas líneas del log):"
+    docker compose logs --tail 12 api
+    exit 1
+  fi
   if curl -fs http://localhost:8000/health >/dev/null 2>&1; then
     echo
     echo "✅ Sistema listo:"

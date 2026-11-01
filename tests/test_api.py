@@ -164,3 +164,22 @@ def test_todos_los_endpoints_tienen_modelo_de_respuesta(app_test):
         if ruta.path.endswith("/events"):
             continue
         assert ruta.response_model is not None, ruta.path
+
+
+def _error_openai(clase, estado: int, mensaje: str):
+    respuesta = httpx.Response(estado, request=httpx.Request("POST", "https://api.openai.com/v1/embeddings"))
+    return clase(mensaje, response=respuesta, body=None)
+
+
+def test_error_de_key_vencida_se_explica_claramente():
+    """Caso real de la primera corrida: la key de OpenAI estaba vencida y el
+    motivo quedaba al final de un traceback largo."""
+    import openai
+
+    from app.main import explicar_error_de_proveedor
+
+    texto = explicar_error_de_proveedor(_error_openai(openai.AuthenticationError, 401, "Your API key has expired."))
+    assert "OPENAI_API_KEY" in texto and "expired" in texto and "platform.openai.com/api-keys" in texto
+    sin_saldo = explicar_error_de_proveedor(_error_openai(openai.RateLimitError, 429, "insufficient_quota"))
+    assert "saldo" in sin_saldo
+    assert explicar_error_de_proveedor(ValueError("otra cosa")) is None

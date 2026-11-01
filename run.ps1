@@ -22,11 +22,19 @@ if (Select-String -Path .env -Pattern '^OPENAI_API_KEY=(sk-\.\.\.)?$' -Quiet) {
 }
 
 Write-Host "Construyendo y levantando Redis 8 + Chroma + API..." -ForegroundColor Cyan
-docker compose up --build -d
+# --force-recreate api: si cambiaste el .env, el contenedor lo vuelve a leer.
+docker compose up --build -d --force-recreate api
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host -NoNewline "Esperando a la API (la primera vez indexa el corpus)"
 for ($i = 0; $i -lt 90; $i++) {
+    $caido = docker compose ps -a -q --status exited --status restarting api
+    if ($caido) {
+        Write-Host ""
+        Write-Host "La API se detuvo al arrancar. Motivo (ultimas lineas del log):" -ForegroundColor Red
+        docker compose logs --tail 12 api
+        exit 1
+    }
     try {
         $salud = Invoke-RestMethod -Uri http://localhost:8000/health -TimeoutSec 3
         Write-Host ""
