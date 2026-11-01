@@ -63,7 +63,10 @@ class Settings(BaseSettings):
     rag_candidatos: int = Field(20, ge=1, le=200, description="Candidatos por método antes de fusionar.")
     rag_rrf_k: int = Field(60, ge=1, description="Constante de Reciprocal Rank Fusion.")
     rag_umbral_similitud: float = Field(
-        0.30, ge=-1.0, le=1.0, description="Similitud coseno mínima para considerar relevante un fragmento."
+        0.39,
+        ge=-1.0,
+        le=1.0,
+        description="Similitud coseno mínima para considerar relevante un fragmento (calibrada con evaluar_rag).",
     )
 
     # --- Orquestación ---------------------------------------------------------

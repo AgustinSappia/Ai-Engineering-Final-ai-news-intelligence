@@ -255,7 +255,30 @@ Los 5 escenarios de `demo_escenarios.py`:
 
 ### Resultados con la API real (OpenAI + LangSmith)
 
-> **PENDIENTE:** pegar la salida de `demo_escenarios.py`, `carga_concurrente.py` y `evaluar_rag.py` corridos contra el sistema levantado con Docker Compose, y la lectura del dashboard de LangSmith.
+#### Calidad del RAG y calibración del umbral
+
+`docker compose exec api python -m scripts.evaluar_rag`, con `text-embedding-3-small`. Salida real:
+
+```
+Calidad de recuperación (12 preguntas de referencia, k=5)
+
+método             Hit@5  Recall@5     MRR
+vector              1.00      0.97    1.00
+bm25                1.00      1.00    0.92
+hibrido             1.00      0.97    1.00
+
+Calibración del umbral de relevancia (similitud coseno máxima por pregunta)
+  preguntas EN la base:    mín 0.490 | prom 0.598
+  preguntas FUERA de base: máx 0.281 | prom 0.259
+  -> Separación limpia. Umbral sugerido: 0.39 (actual RAG_UMBRAL_SIMILITUD=0.3)
+```
+
+Cómo leerlo:
+
+- **Los tres métodos encuentran siempre una noticia correcta (Hit@5 = 1.00).** El vectorial ordena mejor (MRR 1.00 contra 0.92 de BM25) y BM25 no se pierde ninguna noticia esperada (Recall 1.00). El híbrido se queda con el orden del vectorial, y BM25 lo cubre cuando la consulta trae nombres propios o siglas (lo prueba `test_recuperador.py`).
+- **El umbral separa sin superposición.** La pregunta de la base con la similitud más baja llega a 0.490, y la más alta de las de afuera, a 0.281. El umbral inicial (0.30) quedaba casi pegado a las de afuera: en la primera corrida, la búsqueda de "chips" trajo noticias de relleno. Se calibró en el punto medio, **0.39**, que ahora es el valor por defecto.
+
+> **PENDIENTE:** salida de `demo_escenarios.py` y `carga_concurrente.py` con el umbral calibrado, y la lectura del dashboard de LangSmith.
 
 ### Prueba de persistencia: reiniciar la API con un job pausado
 
