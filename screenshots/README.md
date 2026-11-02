@@ -1,17 +1,14 @@
 # Capturas de LangSmith (evidencia de trazabilidad)
 
-Todas salen del proyecto `ai-news-intelligence` en <https://smith.langchain.com>
-(**Tracing Projects**). Conviene filtrar por la hora de la corrida o por el tag
-`entrega-final`.
+Proyecto `ai-news-intelligence` en <https://smith.langchain.com>, corrida de
+`demo_escenarios.py` (19:39) y de `carga_concurrente.py` (19:40) del 1/11/2026.
 
-| Archivo | Qué capturar | Dónde |
-|---|---|---|
-| `01_lista_trazas.jpg` | La lista de trazas de las 5 pruebas (`sistema-inteligencia.ejecucion` y `sistema-inteligencia.reanudacion`), con las columnas **Latency, Tokens y Cost** | Pestaña **Traces** |
-| `02_waterfall_informe.jpg` | El árbol de una ejecución completa: Supervisor → Investigador (`investigador.planificar_busqueda` + `buscar_noticias`) → Analista → Redactor → `supervisor.evaluar_informe` → AprobacionHumana → Publicador | Clic en una traza → botón **Waterfall** |
-| `03_herramienta_rag.jpg` | El span `buscar_noticias` abierto: la **entrada** (consulta y filtros que eligió el LLM) y la **salida** (noticias con similitud, BM25 y RRF) | Clic en el span `buscar_noticias` |
-| `04_hitl_thread.jpg` | Un job con aprobación humana como **Thread** de 2 turnos: el turno 1 termina en `AprobacionHumana` (Interrupted / GraphInterrupt) y el turno 2 reanuda hasta `Publicador` | Pestaña **Threads** |
-| `05_sin_informacion.jpg` | El escenario 5 (tema fuera de la base): dos búsquedas sin resultados y **ninguna** llamada del Redactor al LLM | Traza del tema "resultados del campeonato de fútbol" |
-| `06_costo_y_latencia.jpg` | La carga concurrente: costo por ejecución y latencias (P50/P99 en la vista Threads, o la columna Latency para calcular el p95) | Pestaña **Threads** o **Traces** |
-| `07_tokens_por_llamada.jpg` | El detalle de tokens (entrada/salida) de las llamadas a `ChatOpenAI` de cada agente | Clic en cada span `ChatOpenAI` |
-
-Para sacar una captura en Windows: `Win + Shift + S`.
+| Archivo | Qué muestra |
+|---|---|
+| `01_lista_trazas.jpg` | Pestaña **Traces**: las ejecuciones (`sistema-inteligencia.ejecucion`) y reanudaciones tras la aprobación humana (`sistema-inteligencia.reanudacion`), con latencia, tokens, costo y los tags `entrega-final` / etapa. |
+| `02_waterfall_informe.jpg` | **Waterfall** del escenario 1: Supervisor → Investigador (`investigador.planificar_busqueda` + `buscar_noticias`) → Analista → Redactor → `supervisor.evaluar_informe`, y la **segunda vuelta** que pidió el Supervisor (refinamiento). 21 s, 8.657K tokens, US$0.0019. |
+| `03_herramienta_rag.jpg` | El span de la herramienta `buscar_noticias`: la **entrada** que eligió el LLM (consulta con sinónimos, `k=5`, sin filtros) y la **salida** (29 candidatos evaluados, 5 noticias con `score_bm25` y `score_rrf`, umbral usado). |
+| `04_hitl_thread.jpg` | El escenario 2 como **Thread de 2 turnos**: el turno 1 termina en `AprobacionHumana` (pausa) y el turno 2 reanuda con `{"aprobado": true, "revisor": "demo"}` → `AprobacionHumana` → `Publicador`. La reanudación tarda 0.02 s y no gasta tokens. |
+| `05_sin_informacion.jpg` | El escenario 5 (fútbol): dos búsquedas sin resultados, y después el Analista y el Redactor en 0.00 s, **sin ninguna llamada al LLM**. Salida `sin_datos` / `suficiente: false`. 1.0K tokens, US$0.0002. |
+| `06_costo_y_latencia.jpg` | Pestaña **Threads**: un hilo por job, con turnos, latencia **P50/P99**, tokens y costo. Arriba, los 5 jobs de la carga concurrente (19:40:38). |
+| `07_tokens_por_llamada.jpg` | Metadata de la llamada `ChatOpenAI` del Redactor: `usage_metadata` (1166 tokens de entrada, 319 de salida), modelo `gpt-4o-mini`, `temperature 0`, y el `job_id` / `thread_id` que lo vincula al job de la API. |

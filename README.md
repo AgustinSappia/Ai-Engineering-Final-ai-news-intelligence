@@ -278,7 +278,63 @@ Cómo leerlo:
 - **Los tres métodos encuentran siempre una noticia correcta (Hit@5 = 1.00).** El vectorial ordena mejor (MRR 1.00 contra 0.92 de BM25) y BM25 no se pierde ninguna noticia esperada (Recall 1.00). El híbrido se queda con el orden del vectorial, y BM25 lo cubre cuando la consulta trae nombres propios o siglas (lo prueba `test_recuperador.py`).
 - **El umbral separa sin superposición.** La pregunta de la base con la similitud más baja llega a 0.490, y la más alta de las de afuera, a 0.281. El umbral inicial (0.30) quedaba casi pegado a las de afuera: en la primera corrida, la búsqueda de "chips" trajo noticias de relleno. Se calibró en el punto medio, **0.39**, que ahora es el valor por defecto.
 
-> **PENDIENTE:** salida de `demo_escenarios.py` y `carga_concurrente.py` con el umbral calibrado, y la lectura del dashboard de LangSmith.
+#### Las 5 pruebas de punta a punta
+
+`python scripts/demo_escenarios.py` contra el sistema levantado con Docker Compose (gpt-4o-mini + `text-embedding-3-small`, LangSmith activo). Salida real, resumida:
+
+```
+[1] Informe positivo (sin pausa)
+     🔎 Investigador: 'avances en chips, hardware eficiente, tecnología de semiconductores, ...' -> ['N07', 'N18', 'N28', 'N22', 'N12']
+     ✍️  Redactor: 4 hallazgos, 0 citas descartadas
+     🧭 [paso 4] Investigador: El informe se apoya en una sola fuente principal sobre el chip de Silicio Pampa ...
+     🔎 Investigador: '... innovación en circuitos integrados, desarrollo de microchips para IA' -> ['N07', 'N18', 'N14', 'N22', 'N28']
+     🧭 [paso 7] FINALIZAR: (guardrail) Sin más intentos de investigación. El LLM sugería: ...
+[2] Informe negativo con aprobación humana
+     ⏸  Pide aprobación: El informe tiene sentimiento general NEGATIVO (score promedio 0.2) ...
+     ✅ Aprobado (HTTP 202)
+[3] Aprobación humana rechazada
+     ⏸  Pide aprobación: El informe tiene sentimiento general NEGATIVO (score promedio 0.0) ...
+     ⛔ Rechazado (HTTP 202)
+[4] Filtros de metadatos (fecha)
+     🔎 Investigador: 'lanzamientos, nuevos modelos de lenguaje, ...' -> ['N17', 'N24', 'N29', 'N27', 'N26']
+     ✅ todas las fuentes son desde 2026-05-01
+[5] Tema fuera de la base (anti-alucinación)
+     🔎 Investigador: 'resultados, campeonato de fútbol, ...' -> []
+     🧭 [paso 2] Investigador: La búsqueda no encontró noticias relevantes: se reformula la consulta.
+     🔎 Investigador: 'resultados, puntajes, clasificaciones, ... torneo de fútbol' -> []
+     🧭 [paso 3] Analista: Sin noticias relevantes tras 2 intentos: se registra que no hay datos.
+
+==============================================================================
+✅ [1] Informe positivo (sin pausa)                 DONE        22.7 s
+✅ [2] Informe negativo con aprobación humana       DONE        10.6 s
+✅ [3] Aprobación humana rechazada                  REJECTED    10.4 s
+✅ [4] Filtros de metadatos (fecha)                 DONE        10.1 s
+✅ [5] Tema fuera de la base (anti-alucinación)     DONE         2.6 s
+==============================================================================
+```
+
+Qué se ve:
+
+- **El Supervisor usa criterio y los guardrails lo frenan.** En el escenario 1 el LLM juzgó que el informe dependía de una sola fuente y pidió otra búsqueda. Al pedir una tercera, el tope `MAX_INTENTOS_INVESTIGACION` cerró el flujo en código. El costo de ese criterio se ve en LangSmith: el doble de tokens y de tiempo que un informe sin refinamiento.
+- **El HITL funciona en los dos sentidos.** El escenario 2 se aprobó y publicó. El 3 se rechazó y no publicó nada.
+- **Los filtros del usuario se respetan.** En el escenario 4 todas las fuentes son de mayo de 2026 en adelante.
+- **Sin datos no se inventa nada.** En el escenario 5 el sistema reformula una vez, admite que no hay información y no llama al LLM para redactar.
+
+#### Carga concurrente
+
+`python scripts/carga_concurrente.py`, 5 temas a la vez (uno pasa por aprobación humana). Salida real, resumida:
+
+```
+Tiempo total de la corrida: 20.12 s (la suma de las tareas sería 74.1 s)
+Latencia de POST /tasks  -> máx 97.1 ms | p95 97.1 ms
+Latencia extremo a extremo (cliente) -> p50 11.47 s | p95 20.12 s
+```
+
+- **La API no espera al LLM.** `POST /tasks` respondió siempre en menos de 100 ms, con 5 grafos corriendo.
+- **Los jobs corren en paralelo.** La corrida tardó lo que el job más largo (20 s), no la suma (74 s).
+- **El p95 lo marcan los informes con refinamiento.** Esos ~20 s son dos vueltas completas de Investigador → Analista → Redactor.
+
+> Estas corridas se hicieron con el umbral inicial (`RAG_UMBRAL_SIMILITUD=0.30`), antes de calibrarlo. Con 0.39 se descartan las noticias de relleno que se ven en el escenario 1 (N18, N28); el resto del comportamiento no cambia.
 
 ### Prueba de persistencia: reiniciar la API con un job pausado
 
@@ -352,9 +408,29 @@ Con `metadata.thread_id`, LangSmith agrupa en un mismo **Thread** la ejecución 
 
 **Logs.** Formato uniforme. Cada request deja método, ruta, estado, duración y `X-Request-ID`, y cada paso del worker queda con su `job_id`. Para verlos: `./run.sh logs` o `.\run.ps1 logs`.
 
-**Capturas del dashboard:** carpeta [`screenshots/`](screenshots/README.md).
+**Capturas del dashboard** (todas en [`screenshots/`](screenshots/README.md), con la descripción de cada una):
 
-> **PENDIENTE:** capturas de LangSmith de las 5 pruebas y de la carga concurrente.
+| Lista de trazas con latencia, tokens y costo | Un job completo en Waterfall (con refinamiento) |
+|---|---|
+| ![Lista de trazas](screenshots/01_lista_trazas.jpg) | ![Waterfall](screenshots/02_waterfall_informe.jpg) |
+| **La herramienta RAG: lo que pidió el LLM y lo que devolvió** | **HITL: un Thread de 2 turnos (pausa y reanudación)** |
+| ![buscar_noticias](screenshots/03_herramienta_rag.jpg) | ![Thread HITL](screenshots/04_hitl_thread.jpg) |
+| **Tema fuera de la base: sin llamadas al LLM para redactar** | **Threads: P50/P99, tokens y costo por job** |
+| ![Sin información](screenshots/05_sin_informacion.jpg) | ![Costo y latencia](screenshots/06_costo_y_latencia.jpg) |
+
+**Lectura del dashboard:**
+
+| Caso | Latencia | Tokens | Costo (gpt-4o-mini) |
+|---|---|---|---|
+| Informe sin refinamiento (escenarios 2, 3 y 4) | ~10 s | ~4.4K | ~US$0.0010 |
+| Informe con un refinamiento (escenario 1 y tres jobs de la carga) | ~17-21 s | ~8.5K | ~US$0.0019 |
+| Reanudación tras la aprobación humana | 0.02 s | 0 | 0 |
+| Tema fuera de la base (escenario 5) | 2.5 s | 1.0K | US$0.0002 |
+
+- **El costo lo explica el criterio del Supervisor.** Un refinamiento duplica tokens y tiempo, por eso hay un tope de intentos. Afinar el umbral del RAG reduce los refinamientos innecesarios.
+- **Pausar es gratis.** Gracias al checkpointer, la reanudación no repite ningún paso: va directo de `AprobacionHumana` a `Publicador`.
+- **El "no sé" es barato.** Sin datos, el sistema no llama al LLM para analizar ni redactar.
+- **Cada llamada se puede auditar.** El detalle de tokens por llamada, con el `job_id` que la vincula a la API, está en [`07_tokens_por_llamada.jpg`](screenshots/07_tokens_por_llamada.jpg).
 
 ---
 
